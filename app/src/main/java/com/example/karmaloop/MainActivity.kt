@@ -5,16 +5,18 @@ import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.drawable.Drawable // Needed for App Icons
+import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.widget.ImageView // Needed for rendering App Icons
+import android.widget.ImageView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
@@ -46,10 +48,24 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView // Needed for App Icons
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+// Google & Firebase Imports
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.common.api.ApiException
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.GoogleAuthProvider
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
+import coil.compose.AsyncImage
+import com.google.firebase.auth.FirebaseUser
+import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
-// Data Models (Updated to hold the real App Icon)
+
+// Data Models
 data class AppInfo(val name: String, val packageName: String, val icon: Drawable)
 data class Developer(val name: String, val role: String, val skills: String, val desc: String, val imageRes: Int)
 
@@ -68,7 +84,7 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 // GLOBAL BACKGROUND
                 Box(modifier = Modifier.fillMaxSize()) {
-                    // Background Image
+                    // Background Image (As requested, logic preserved)
                     Image(
                         painter = painterResource(id = R.drawable.app_bg),
                         contentDescription = "Background",
@@ -76,7 +92,7 @@ class MainActivity : ComponentActivity() {
                         contentScale = ContentScale.Crop
                     )
 
-                    // Professional Dark Overlay (Gradient for better look)
+                    // Professional Dark Overlay
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -97,17 +113,29 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun KarmaLoopApp() {
     val context = LocalContext.current
-    var currentScreen by remember { mutableStateOf("Home") }
+    val auth = FirebaseAuth.getInstance()
+
+    // User Data track karein
+    var currentUser by remember { mutableStateOf(auth.currentUser) }
+    var currentScreen by remember { mutableStateOf(if (currentUser != null) "Home" else "Login") }
 
     if (!hasUsageStatsPermission(context)) {
         PermissionScreen(context)
     } else {
-        // Crossfade Animation between screens
         AnimatedContent(targetState = currentScreen, label = "ScreenNav") { screen ->
             when (screen) {
+                "Login" -> LoginScreen(onLoginSuccess = {
+                    currentUser = auth.currentUser // 👈 Login hote hi data update hoga
+                    currentScreen = "Home"
+                })
                 "Home" -> HomeScreen(
+                    user = currentUser, // 👈 Hum user ka data Home ko bhej rahe hain
                     onNavigateToCategories = { currentScreen = "AppList" },
-                    onNavigateToDev = { currentScreen = "Developers" }
+                    onNavigateToDev = { currentScreen = "Developers" },
+                    onLogout = {
+                        auth.signOut()
+                        currentScreen = "Login"
+                    }
                 )
                 "AppList" -> AppListScreen(onBack = { currentScreen = "Home" })
                 "Developers" -> AboutDeveloperScreen(onBack = { currentScreen = "Home" })
@@ -117,137 +145,250 @@ fun KarmaLoopApp() {
 }
 
 // =======================
-// 🏠 SCREEN 1: HOME
+// 🔐 SCREEN: LOGIN (NEW ADDITION)
 // =======================
+
 @Composable
-fun HomeScreen(onNavigateToCategories: () -> Unit, onNavigateToDev: () -> Unit) {
+fun LoginScreen(onLoginSuccess: () -> Unit) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    var isLoading by remember { mutableStateOf(false) }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier.fillMaxSize().padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Spacer(modifier = Modifier.height(50.dp))
+    // Firestore ka instance
+    val db = FirebaseFirestore.getInstance()
 
-            // --- LOGO (Professional Glow) ---
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .size(140.dp)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.radialGradient(
-                            colors = listOf(Color.White.copy(alpha=0.3f), Color.Transparent)
-                        )
+    val googleSignInClient = remember {
+        val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            .requestIdToken(context.getString(R.string.default_web_client_id))
+            .requestEmail()
+            .build()
+        GoogleSignIn.getClient(context, gso)
+    }
+
+    val launcher = rememberLauncherForActivityResult(contract = ActivityResultContracts.StartActivityForResult()) { result ->
+        val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
+        try {
+            val account = task.getResult(ApiException::class.java)
+            val credential = GoogleAuthProvider.getCredential(account.idToken, null)
+            coroutineScope.launch {
+                val authResult = FirebaseAuth.getInstance().signInWithCredential(credential).await()
+                val user = authResult.user
+
+                // 🔥 DATABASE SAVE LOGIC (NEW)
+                if (user != null) {
+                    val userData = hashMapOf(
+                        "name" to (user.displayName ?: "Unknown"),
+                        "email" to (user.email ?: ""),
+                        "uid" to user.uid,
+                        "points" to 0, // Shuru mein 0 points
+                        "lastLogin" to System.currentTimeMillis()
                     )
-            ) {
-                Image(
-                    painter = painterResource(id = R.drawable.app_logo),
-                    contentDescription = "Logo",
-                    modifier = Modifier.size(110.dp).clip(CircleShape)
-                )
+
+                    // User ko DB mein save karo (Merge true taaki purana data delete na ho)
+                    db.collection("users").document(user.uid)
+                        .set(userData, com.google.firebase.firestore.SetOptions.merge())
+                        .await()
+                }
+
+                isLoading = false
+                onLoginSuccess()
             }
+        } catch (e: Exception) {
+            isLoading = false
+            Toast.makeText(context, "Login Failed: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
 
+    // UI CODE (Ye wahi purana hai, same rakhna)
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Image(
+                painter = painterResource(id = R.drawable.app_logo),
+                contentDescription = "Logo",
+                modifier = Modifier.size(120.dp).clip(CircleShape).background(Color.White).border(2.dp, Color.White, CircleShape)
+            )
             Spacer(modifier = Modifier.height(20.dp))
+            Text("Welcome Back", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            Text("Sign in to sync your focus.", color = Color.White)
+            Spacer(modifier = Modifier.height(40.dp))
 
-            // --- PROFESSIONAL TEXT TYPOGRAPHY ---
-            GlassCard {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(vertical = 20.dp, horizontal = 40.dp)
+            if (isLoading) {
+                CircularProgressIndicator(color = Color.White)
+            } else {
+                Button(
+                    onClick = {
+                        isLoading = true
+                        launcher.launch(googleSignInClient.signInIntent)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                    modifier = Modifier.fillMaxWidth(0.8f).height(50.dp),
+                    shape = RoundedCornerShape(25.dp)
                 ) {
-                    Text(
-                        text = "KarmaLoop",
-                        style = TextStyle(
-                            fontSize = 38.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            fontFamily = FontFamily.Serif,
-                            shadow = Shadow(
-                                color = Color.Black.copy(alpha = 0.25f),
-                                offset = Offset(4f, 4f),
-                                blurRadius = 8f
-                            )
-                        ),
-                        color = Color.Black
-                    )
-
-                    // Golden Gradient Text for Subtitle
-                    Text(
-                        text = "FOCUS MASTERY",
-                        style = TextStyle(
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 4.sp,
-                            brush = Brush.linearGradient(
-                                colors = listOf(Color(0xFF8E2DE2), Color(0xFF4A00E0)) // Deep Purple/Blue gradient
-                            )
-                        )
-                    )
+                    Text("Sign in with Google", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 }
             }
-
-            Spacer(modifier = Modifier.height(60.dp))
-
-            // Professional Gradient Buttons
-            GradientButton(text = "Start Focus Mode", icon = Icons.Default.PlayArrow, color1 = Color(0xFF11998e), color2 = Color(0xFF38ef7d)) {
-                val intent = Intent(context, TrackingService::class.java)
-                context.startForegroundService(intent)
-                Toast.makeText(context, "Tracker Started!", Toast.LENGTH_SHORT).show()
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            GradientButton(text = "Manage Apps", icon = Icons.Default.Settings, color1 = Color(0xFF4facfe), color2 = Color(0xFF00f2fe)) {
-                onNavigateToCategories()
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            GradientButton(text = "Stop Tracking", icon = Icons.Default.Close, color1 = Color(0xFFff9966), color2 = Color(0xFFff5e62)) {
-                val intent = Intent(context, TrackingService::class.java)
-                context.stopService(intent)
-                Toast.makeText(context, "Stopped", Toast.LENGTH_SHORT).show()
-            }
-        }
-
-        // Floating Icons
-        FloatingActionButton(
-            onClick = onNavigateToDev,
-            containerColor = Color.White,
-            modifier = Modifier.align(Alignment.BottomStart).padding(30.dp)
-        ) {
-            Icon(Icons.Default.Person, contentDescription = "Dev", tint = Color.Black)
-        }
-
-        FloatingActionButton(
-            onClick = {
-                val url = "https://wa.me/7838758231"
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-            },
-            containerColor = Color(0xFF25D366),
-            modifier = Modifier.align(Alignment.BottomEnd).padding(30.dp)
-        ) {
-            Icon(Icons.Default.Phone, contentDescription = "Contact", tint = Color.White)
         }
     }
 }
 
 // =======================
-// 📃 SCREEN 2: APP LIST (WITH REAL ICONS & RESET)
+// 🏠 SCREEN 1: HOME (UPDATED WITH LOGOUT)
+// =======================
+@Composable
+fun HomeScreen(
+    user: FirebaseUser?,
+    onNavigateToCategories: () -> Unit,
+    onNavigateToDev: () -> Unit,
+    onLogout: () -> Unit
+) {
+    val context = LocalContext.current
+
+    // NOTE: Points logic removed from UI as requested
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // 🔥 MAIN COLUMN (Scrollable & Optimized Spacing)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp) // Side padding only
+                .verticalScroll(rememberScrollState()), // 👈 SCROLL ENABLED
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+
+            // 1. TOP SPACING (Reduced to move everything UP)
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // 2. HEADER (Profile & Logout)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.Gray.copy(alpha = 0.8f), RoundedCornerShape(50.dp))
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (user?.photoUrl != null) {
+                        AsyncImage(
+                            model = user.photoUrl,
+                            contentDescription = "Profile",
+                            modifier = Modifier.size(40.dp).clip(CircleShape).border(2.dp, Color.White, CircleShape),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        Icon(Icons.Default.Person, "Profile", tint = Color.White, modifier = Modifier.size(40.dp))
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text("Welcome Back,", color = Color.White, fontSize = 12.sp)
+                        Text(user?.displayName ?: "User", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    }
+                }
+                IconButton(onClick = onLogout) {
+                    Icon(Icons.Default.ExitToApp, "Logout", tint = Color(0xFFFF5252))
+                }
+            }
+
+            // 3. LOGO SECTION (Gap Reduced: 40dp -> 20dp)
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(150.dp)
+                    .clip(CircleShape)
+                    .background(Brush.radialGradient(colors = listOf(Color.White.copy(alpha=1f), Color.Transparent)))
+            ) {
+                Image(
+                    painter = painterResource(id = R.drawable.app_logo),
+                    contentDescription = "Logo",
+                    modifier = Modifier.size(120.dp).clip(CircleShape)
+                )
+            }
+
+            // 4. TITLE (Gap Reduced: 20dp -> 10dp)
+            Spacer(modifier = Modifier.height(10.dp))
+
+            GlassCard {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(vertical = 16.dp, horizontal = 30.dp)
+                ) {
+                    Text(
+                        text = "KarmaLoop",
+                        style = TextStyle(
+                            fontSize = 32.sp, // Thoda chota kiya for better fit
+                            fontWeight = FontWeight.ExtraBold,
+                            fontFamily = FontFamily.Serif,
+                            shadow = Shadow(Color.Blue.copy(0.25f), Offset(4f, 4f), 8f)
+                        ),
+                        color = Color.Black
+                    )
+                    Text(
+                        text = "FOCUS MASTERY",
+                        style = TextStyle(
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 4.sp,
+                            brush = Brush.linearGradient(listOf(Color(0xFF2D8EE2), Color(0xFF5FCFE3)))
+                        )
+                    )
+                }
+            }
+
+            // 5. BUTTONS START (Gap Reduced: 50dp -> 30dp)
+            Spacer(modifier = Modifier.height(30.dp))
+
+            GradientButton("Start Focus Mode", Icons.Default.PlayArrow, Color(0xFF11998e), Color(0xFF38ef7d)) {
+                val intent = Intent(context, TrackingService::class.java)
+                context.startForegroundService(intent)
+                Toast.makeText(context, "Tracker Started!", Toast.LENGTH_SHORT).show()
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            GradientButton("Manage Apps", Icons.Default.Settings, Color(0xFF4facfe), Color(0xFF00f2fe)) { onNavigateToCategories() }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Visit Dashboard Button
+            GradientButton("Visit Dashboard", Icons.Default.Info, Color(0xFF8E2DE2), Color(0xFF4A00E0)) {
+                Toast.makeText(context, "Dashboard Website Coming Soon!", Toast.LENGTH_SHORT).show()
+                val url = "https://karmaloop-94f77.web.app" // Future URL
+                // context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            GradientButton("Stop Tracking", Icons.Default.Close, Color(0xFFff9966), Color(0xFFff5e62)) {
+                val intent = Intent(context, TrackingService::class.java)
+                context.stopService(intent)
+                Toast.makeText(context, "Stopped", Toast.LENGTH_SHORT).show()
+            }
+
+            // 🔥 BOTTOM CUSHION (Ye zaroori hai taaki last button chhupe nahi)
+            Spacer(modifier = Modifier.height(100.dp))
+        }
+
+        // Floating Buttons (Z-Index High, they stay on top)
+        FloatingActionButton(onClick = onNavigateToDev, containerColor = Color.White, modifier = Modifier.align(Alignment.BottomStart).padding(30.dp)) { Icon(Icons.Default.Person, "Dev", tint = Color.Black) }
+        FloatingActionButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/7838758231"))) }, containerColor = Color(0xFF25D366), modifier = Modifier.align(Alignment.BottomEnd).padding(30.dp)) { Icon(Icons.Default.Phone, "Contact", tint = Color.White) }
+    }
+}
+// =======================
+// 📃 SCREEN 2: APP LIST
 // =======================
 @Composable
 fun AppListScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     var installedApps by remember { mutableStateOf(listOf<AppInfo>()) }
+    var isLoading by remember { mutableStateOf(true) } // Loading Indicator
     val sharedPrefs = context.getSharedPreferences("KarmaPrefs", Context.MODE_PRIVATE)
     val appCategories = remember { mutableStateMapOf<String, String>() }
 
     BackHandler { onBack() }
 
-    // Logic to reset all categories
     fun resetCategories() {
-        // Clear logic
         val editor = sharedPrefs.edit()
         installedApps.forEach { app ->
             editor.remove(app.packageName)
@@ -257,16 +398,18 @@ fun AppListScreen(onBack: () -> Unit) {
         Toast.makeText(context, "All categories reset", Toast.LENGTH_SHORT).show()
     }
 
+    // 🔥 Load Apps in Background (No Lag)
     LaunchedEffect(Unit) {
-        installedApps = getInstalledApps(context)
+        isLoading = true
+        installedApps = getInstalledApps(context) // Calls the optimized function
         installedApps.forEach { app ->
             val savedCat = sharedPrefs.getString(app.packageName, "None")
             if (savedCat != null) appCategories[app.packageName] = savedCat
         }
+        isLoading = false
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // Top Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -281,17 +424,20 @@ fun AppListScreen(onBack: () -> Unit) {
                 Spacer(modifier = Modifier.width(16.dp))
                 Text("Manage Categories", fontSize = 22.sp, fontWeight = FontWeight.Bold)
             }
-
-            // RESET BUTTON
             IconButton(onClick = { resetCategories() }) {
                 Icon(Icons.Default.Refresh, contentDescription = "Reset", tint = Color.Red)
             }
         }
 
-        // Staggered Animation List
-        LazyColumn(contentPadding = PaddingValues(16.dp)) {
-            itemsIndexed(installedApps) { index, app ->
-                StaggeredEntry(delay = index * 30) { // Faster animation
+        if (isLoading) {
+            // Loading Spinner jab tak apps load na ho
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = Color.Black)
+            }
+        } else {
+            LazyColumn(contentPadding = PaddingValues(16.dp)) {
+                itemsIndexed(installedApps) { index, app ->
+                    // Animation hata di thodi speed badhane ke liye
                     AppRowWidget(
                         app = app,
                         currentCategory = appCategories[app.packageName] ?: "None",
@@ -332,7 +478,7 @@ fun AboutDeveloperScreen(onBack: () -> Unit) {
                     "Nikhil Rai", "Lead Developer",
                     "Android • React • Firebase • Authentication • DB",
                     "Building tools to help students reclaim their focus.",
-                    R.drawable.nikhil
+                    R.drawable.nikhil // Keeps original ID
                 )
             )
 
@@ -343,7 +489,7 @@ fun AboutDeveloperScreen(onBack: () -> Unit) {
                     "Chandra Shekhar Singh", "Full Stack Developer",
                     "React • Firebase • Authentication • Databases",
                     "Crafting seamless user experiences.",
-                    R.drawable.shekhar
+                    R.drawable.shekhar // Keeps original ID
                 )
             )
 
@@ -416,7 +562,6 @@ fun FlipCard(developer: Developer) {
 
 @Composable
 fun AppRowWidget(app: AppInfo, currentCategory: String, onCategorySelected: (String) -> Unit) {
-    // Control Center Style Widget
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.9f)),
@@ -427,7 +572,6 @@ fun AppRowWidget(app: AppInfo, currentCategory: String, onCategorySelected: (Str
             modifier = Modifier.padding(16.dp).fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // REAL APP ICON RENDERING
             AndroidView(
                 modifier = Modifier.size(45.dp),
                 factory = { ctx ->
@@ -446,7 +590,6 @@ fun AppRowWidget(app: AppInfo, currentCategory: String, onCategorySelected: (Str
             }
         }
 
-        // Segmented Control
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -512,7 +655,6 @@ fun GradientButton(text: String, icon: ImageVector, color1: Color, color2: Color
             contentAlignment = Alignment.Center
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Icon Bubble
                 Box(
                     modifier = Modifier.size(32.dp).clip(CircleShape).background(Color.White.copy(alpha=0.2f)),
                     contentAlignment = Alignment.Center
@@ -531,14 +673,13 @@ fun GlassCard(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(24.dp))
-            .background(Color.White.copy(alpha = 0.85f)) // Slightly clearer for professional look
+            .background(Color.White.copy(alpha = 0.85f))
             .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(24.dp))
     ) {
         content()
     }
 }
 
-// Permissions Helper
 @Composable
 fun PermissionScreen(context: Context) {
     Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
@@ -560,18 +701,28 @@ fun hasUsageStatsPermission(context: Context): Boolean {
     return mode == AppOpsManager.MODE_ALLOWED
 }
 
-fun getInstalledApps(context: Context): List<AppInfo> {
+// 👇 IS FUNCTION KO PURA REPLACE KAR DO (OPTIMIZED VERSION)
+suspend fun getInstalledApps(context: Context): List<AppInfo> = withContext(Dispatchers.IO) {
     val pm = context.packageManager
-    val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+    val mainIntent = Intent(Intent.ACTION_MAIN, null)
+    mainIntent.addCategory(Intent.CATEGORY_LAUNCHER)
+
+    // Sirf wahi apps layega jo Menu me dikhte hain (No System junk)
+    val resolvedInfos = pm.queryIntentActivities(mainIntent, 0)
+
     val userApps = mutableListOf<AppInfo>()
-    for (app in apps) {
-        if (app.packageName == context.packageName) continue
-        val intent = pm.getLaunchIntentForPackage(app.packageName)
-        if (intent != null) {
-            // Load Real App Icon
-            val icon = app.loadIcon(pm)
-            userApps.add(AppInfo(app.loadLabel(pm).toString(), app.packageName, icon))
-        }
+
+    for (info in resolvedInfos) {
+        val packageName = info.activityInfo.packageName
+
+        // Khud ki app ko list me mat dikhao
+        if (packageName == context.packageName) continue
+
+        val label = info.loadLabel(pm).toString()
+        val icon = info.loadIcon(pm)
+
+        userApps.add(AppInfo(label, packageName, icon))
     }
-    return userApps.sortedBy { it.name }
+    // Alphabetical order me sort karo
+    userApps.sortedBy { it.name }
 }
