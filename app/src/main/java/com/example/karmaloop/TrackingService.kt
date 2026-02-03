@@ -17,36 +17,42 @@ import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.util.TreeMap
 
 class TrackingService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var runnable: Runnable? = null
 
-    // 📊 Points Tracking (Total for Notification)
-    private var totalPoints = 0.0
-
-    // 📦 Category Buffers (Alag-alag store karne ke liye)
+    // Buffers
     private var bufferHard = 0.0
     private var bufferMod = 0.0
     private var bufferEasy = 0.0
     private var bufferDist = 0.0
 
+    // DB Counter
     private var dbPushCounter = 0
 
-    // 🔥 Firebase
+    // 🔥 Grind Mode State
+    private var isGrindMode = false
+    private var grindStartTime = 0L
+
     private val db = FirebaseFirestore.getInstance()
     private val auth = FirebaseAuth.getInstance()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        createNotificationChannel()
+        val newGrindState = intent?.getBooleanExtra("GRIND_MODE", false) ?: false
 
-        val notification = NotificationCompat.Builder(this, "karma_channel")
-            .setContentTitle("KarmaLoop: Tracking Focus")
-            .setContentText("Points: 0.0")
-            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
-            .setOngoing(true)
-            .build()
+        // Agar mode change ho raha hai ya first time start hai
+        if (isGrindMode != newGrindState || grindStartTime == 0L) {
+            isGrindMode = newGrindState
+            if (isGrindMode) {
+                grindStartTime = System.currentTimeMillis()
+            }
+        }
+
+        createNotificationChannel()
+        val notification = createNotification("Initializing KarmaLoop...")
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
@@ -59,151 +65,135 @@ class TrackingService : Service() {
     }
 
     private fun startTrackingLoop() {
+        // Purana runnable hatao taaki multiple loops na chalein
+        runnable?.let { handler.removeCallbacks(it) }
+
         val sharedPrefs = getSharedPreferences("KarmaPrefs", Context.MODE_PRIVATE)
         val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
 
         runnable = object : Runnable {
             override fun run() {
-                val time = System.currentTimeMillis()
-                val stats = usageStatsManager.queryUsageStats(
-                    UsageStatsManager.INTERVAL_DAILY,
-                    time - 5000,
-                    time
-                )
+                if (isGrindMode) {
+                    // 🚀 GRIND MODE LOGIC (Time Based)
+                    val elapsedMinutes = (System.currentTimeMillis() - grindStartTime) / 60000
 
-                if (!stats.isNullOrEmpty()) {
-                    val topApp = stats.maxByOrNull { it.lastTimeUsed }
+                    // Logic: Har 2 second loop chalta hai.
+                    // Agar 60 min se upar hai, toh har 2 sec me 0.1 point (approx 3 points/min)
+                    // Ye values adjust ki gayi hain taaki overflow na ho.
+                    when {
+                        elapsedMinutes >= 60 -> bufferHard += 0.1
+                        elapsedMinutes >= 30 -> bufferMod += 0.05
+                        else -> bufferEasy += 0.02
+                    }
 
-                    topApp?.let {
-                        val currentPackageName = it.packageName
+                    updateNotification("Grind Mode: ${elapsedMinutes}m elapsed | Focusing 🔥")
+                } else {
+                    // 📊 NORMAL APP TRACKING LOGIC
+                    // FIX: Window size badha kar 10 seconds kiya (Battery Optimization fix)
+                    val time = System.currentTimeMillis()
+                    val stats = usageStatsManager.queryUsageStats(
+                        UsageStatsManager.INTERVAL_DAILY,
+                        time - 1000 * 10, // Look back 10 seconds
+                        time
+                    )
 
-                        if (currentPackageName != packageName) {
-                            val category = sharedPrefs.getString(currentPackageName, "None")
+                    if (!stats.isNullOrEmpty()) {
+                        // FIX: SortedMap use karke latest app nikala (More Reliable)
+                        val sortedStats = stats.sortedByDescending { it.lastTimeUsed }
+                        val topApp = sortedStats.firstOrNull()
 
-                            // Category wise Logic
-                            when (category) {
-                                "Hard" -> {
-                                    val pts = 1.0
-                                    totalPoints += pts
-                                    bufferHard += pts  // Sirf Hard wale bakse me daalo
+                        topApp?.let {
+                            if (it.packageName != packageName) {
+                                val category = sharedPrefs.getString(it.packageName, "None")
+
+                                // Point Logic (Every 2 seconds)
+                                when (category) {
+                                    "Hard" -> bufferHard += 1.0
+                                    "Mod" -> bufferMod += 0.5
+                                    "Easy" -> bufferEasy += 0.25
+                                    "Dist" -> bufferDist -= 0.125
                                 }
-                                "Mod" -> {
-                                    val pts = 0.5
-                                    totalPoints += pts
-                                    bufferMod += pts
-                                }
-                                "Easy" -> {
-                                    val pts = 0.25
-                                    totalPoints += pts
-                                    bufferEasy += pts
-                                }
-                                "Dist" -> {
-                                    val pts = -0.125
-                                    totalPoints += pts
-                                    bufferDist += pts // Negative value jayegi
+
+                                if (category != "None") {
+                                    updateNotification("Tracking: ${getAppNameFromPackage(it.packageName)} | pts: +${bufferHard+bufferMod+bufferEasy}")
                                 }
                             }
-
-                            // Notification update (Total hi dikhayega user ko)
-                            updateNotification(
-                                "Points: ${"%.2f".format(totalPoints)} | App: ${
-                                    getAppNameFromPackage(currentPackageName)
-                                }"
-                            )
                         }
                     }
                 }
 
-                // 🔄 Firebase push every ~10 sec
+                // 🔄 Firebase push every ~10 sec (Buffer 5 tak)
                 dbPushCounter++
                 if (dbPushCounter >= 5) {
                     pushToDatabase()
                     dbPushCounter = 0
                 }
 
-                handler.postDelayed(this, 2000)
+                handler.postDelayed(this, 2000) // Loop every 2 seconds
             }
         }
         runnable?.let { handler.post(it) }
     }
 
-    // 🔥 Firebase Push (Ab ye Categories bhejega)
     private fun pushToDatabase() {
-        // Agar sabhi buffers 0 hain, toh network call mat karo
+        val uid = auth.currentUser?.uid ?: return
+        // Agar koi points nahi hain to network call mat karo
         if (bufferHard == 0.0 && bufferMod == 0.0 && bufferEasy == 0.0 && bufferDist == 0.0) return
 
-        val uid = auth.currentUser?.uid ?: return
-
-        // Values ko local variables me copy karo (Snapshot)
-        val sendHard = bufferHard
-        val sendMod = bufferMod
-        val sendEasy = bufferEasy
-        val sendDist = bufferDist
-
-        // Buffers ko turant reset kar do
-        bufferHard = 0.0
-        bufferMod = 0.0
-        bufferEasy = 0.0
-        bufferDist = 0.0
+        // Local copy banao aur buffer turant clear karo (Race condition fix)
+        val sHard = bufferHard; val sMod = bufferMod; val sEasy = bufferEasy; val sDist = bufferDist
+        bufferHard = 0.0; bufferMod = 0.0; bufferEasy = 0.0; bufferDist = 0.0
 
         CoroutineScope(Dispatchers.IO).launch {
-            // 📝 AB HUM MULTIPLE FIELDS BHEJ RAHE HAIN
-            val updates = hashMapOf<String, Any>(
-                "points_hard" to FieldValue.increment(sendHard),
-                "points_mod" to FieldValue.increment(sendMod),
-                "points_easy" to FieldValue.increment(sendEasy),
-                "points_dist" to FieldValue.increment(sendDist),
+            try {
+                val updates = hashMapOf<String, Any>(
+                    "points_hard" to FieldValue.increment(sHard),
+                    "points_mod" to FieldValue.increment(sMod),
+                    "points_easy" to FieldValue.increment(sEasy),
+                    "points_dist" to FieldValue.increment(sDist),
+                    "points_total" to FieldValue.increment(sHard + sMod + sEasy + sDist),
+                    "last_active" to System.currentTimeMillis()
+                )
 
-                // Optional: Ek "Total" field bhi rakh sakte hain calculation ke liye
-                "points_total" to FieldValue.increment(sendHard + sendMod + sendEasy + sendDist),
-
-                "last_active" to System.currentTimeMillis()
-            )
-
-            db.collection("users").document(uid)
-                .set(updates, SetOptions.merge())
-                .addOnFailureListener {
-                    // Agar fail hua, toh wapas buffer me jod do taaki data loss na ho
-                    bufferHard += sendHard
-                    bufferMod += sendMod
-                    bufferEasy += sendEasy
-                    bufferDist += sendDist
-                }
+                db.collection("users").document(uid).set(updates, SetOptions.merge())
+            } catch (e: Exception) {
+                // Fail hone par wapas buffer me daal do
+                bufferHard += sHard; bufferMod += sMod; bufferEasy += sEasy; bufferDist += sDist
+            }
         }
     }
 
-    private fun updateNotification(content: String) {
-        val notification = NotificationCompat.Builder(this, "karma_channel")
+    private fun createNotification(content: String): Notification {
+        return NotificationCompat.Builder(this, "karma_channel")
             .setContentTitle("KarmaLoop Active")
             .setContentText(content)
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
             .setOngoing(true)
-            .setOnlyAlertOnce(true)
+            .setOnlyAlertOnce(true) // Baar baar sound nahi bajega
             .build()
+    }
 
+    private fun updateNotification(content: String) {
+        val notification = createNotification(content)
         getSystemService(NotificationManager::class.java).notify(1, notification)
     }
 
     private fun getAppNameFromPackage(packageName: String): String {
         return try {
-            packageManager.getApplicationLabel(
-                packageManager.getApplicationInfo(packageName, 0)
-            ).toString()
-        } catch (e: Exception) {
-            packageName
-        }
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString()
+        } catch (e: Exception) { packageName }
     }
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            "karma_channel",
-            "Focus Tracking",
-            NotificationManager.IMPORTANCE_LOW
-        )
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel("karma_channel", "Focus Tracking", NotificationManager.IMPORTANCE_LOW)
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
+        }
     }
 
     override fun onDestroy() {
+        // Service band hote hi final data push karo
         pushToDatabase()
         runnable?.let { handler.removeCallbacks(it) }
         super.onDestroy()

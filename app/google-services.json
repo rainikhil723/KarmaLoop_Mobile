@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "730687465416",
+    "project_id": "karmaloop-94f77",
+    "storage_bucket": "karmaloop-94f77.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:730687465416:android:6a2821a843519af89e42fd",
+        "android_client_info": {
+          "package_name": "com.example.karmaloop"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "730687465416-8mdjb3lfpqtq5mu7vkb010gtukvjt62m.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.karmaloop",
+            "certificate_hash": "3435ab169e091bde045ec9b7a39143e42b522323"
+          }
+        },
+        {
+          "client_id": "730687465416-f7gndsaahsksntrhc4f2v7gmu7kfh5lj.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBuIeOyBvkStJsWX-rJFqYska0Lh4EEHYM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "730687465416-f7gndsaahsksntrhc4f2v7gmu7kfh5lj.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
