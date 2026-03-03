@@ -14,11 +14,11 @@
       },
       "oauth_client": [
         {
-          "client_id": "730687465416-8mdjb3lfpqtq5mu7vkb010gtukvjt62m.apps.googleusercontent.com",
+          "client_id": "730687465416-jun1khljujkjdbdr8bigulpsehdefvqc.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
             "package_name": "com.example.karmaloop",
-            "certificate_hash": "3435ab169e091bde045ec9b7a39143e42b522323"
+            "certificate_hash": "8035a87acfd582c84e57328ad441de2bf9d34a20"
           }
         },
         {
